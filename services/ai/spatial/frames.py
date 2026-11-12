@@ -157,7 +157,7 @@ def save(frames, dropped, out_dir: Path, meta: dict):
 
 def run(video: str, out: str, mode: str, fps: float | None = None,
         max_side: int = 1600, blur_ratio: float = 0.4,
-        dark: float = 35, bright: float = 225, dup_dist: int = 6) -> dict:
+        dark: float = 35, bright: float = 225, dup_dist: int = 10) -> dict:
     """Run the whole pipeline. Importable from other modules."""
     if fps is None:
         fps = 2.0 if mode == "listing" else 3.0
@@ -187,7 +187,7 @@ def main():
                    help="drop frames below this fraction of median sharpness")
     p.add_argument("--dark", type=float, default=35, help="min mean brightness")
     p.add_argument("--bright", type=float, default=225, help="max mean brightness")
-    p.add_argument("--dup-dist", type=int, default=6,
+    p.add_argument("--dup-dist", type=int, default=10,
                    help="listing mode: hash distance at or below this = duplicate")
     a = p.parse_args()
 
