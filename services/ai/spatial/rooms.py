@@ -30,20 +30,43 @@ import numpy as np
 
 # Each room gets a few phrasings. CLIP scores are averaged across them,
 # which is more reliable than a single prompt.
+# Describe each room by things only that room has. Shared objects (a sink is
+# in both kitchens and bathrooms) pull rooms together and cause confusions.
 ROOM_PROMPTS = {
-    "bedroom": ["a photo of a bedroom", "a bed in an apartment bedroom",
-                "a small dorm bedroom"],
-    "kitchen": ["a photo of a kitchen", "an apartment kitchen with a stove and sink",
-                "kitchen cabinets and countertops"],
-    "bathroom": ["a photo of a bathroom", "a toilet and sink in a bathroom",
-                 "a shower in an apartment bathroom"],
-    "living room": ["a photo of a living room", "a couch in an apartment living room",
-                    "a lounge area with a sofa and TV"],
-    "dining area": ["a photo of a dining area", "a dining table with chairs"],
-    "hallway": ["a photo of a hallway", "a narrow apartment corridor"],
-    "closet": ["a photo of a closet", "clothes hanging in a closet"],
-    "entrance": ["a photo of an apartment entrance", "a front door from inside an apartment"],
-    "balcony": ["a photo of a balcony", "an outdoor apartment balcony"],
+    "bedroom": ["a photo of a bedroom", "a bed with pillows and a blanket",
+                "a small dorm bedroom with a bed and a desk"],
+    "kitchen": ["a photo of a kitchen", "a kitchen with a stove and oven",
+                "a stainless steel fridge in a kitchen", "a microwave above a stove",
+                "kitchen cabinets above a countertop"],
+    "bathroom": ["a photo of a bathroom", "a white toilet in a bathroom",
+                 "a shower curtain over a bathtub", "a bathtub with a shower head",
+                 "a bathroom with a toilet and tiled walls"],
+    "living room": ["a photo of a living room", "a living room with a sofa and coffee table",
+                    "a couch in an apartment living room"],
+    "dining area": ["a photo of a dining area", "a dining table with chairs",
+                    "a table set with plates"],
+    "hallway": ["a photo of a hallway", "a long narrow hallway with doors on the side",
+                "an empty apartment corridor with wood floors"],
+    "closet": ["a photo of a closet", "clothes on hangers in a closet", "an open wardrobe",
+               "shelves with folded clothes", "an empty closet with a clothes rod and wire shelf"],
+    "entrance": ["a photo of an apartment entrance", "an apartment front door seen from inside"],
+    "balcony": ["a photo of a balcony", "an outdoor balcony with a railing"],
+}
+
+# Decoys: things that show up in walkthrough videos but are not a room. They
+# compete with the rooms so that, e.g., a city view through a window doesn't
+# get forced into "balcony". Names start with "_" and are never output.
+DECOY_PROMPTS = {
+    "_window": ["a view of a city through a window", "a window with blinds",
+                "an air conditioner unit under a window"],
+    "_wall": ["a blank wall", "a close-up of a white door", "a framed poster on a wall"],
+}
+
+# What a frame is labeled when a decoy wins. Missing or None = "unsure".
+# Map a decoy to a room name to count it as that room instead.
+DECOY_SHADOWS = {
+    "_window": None,
+    "_wall": None,
 }
 
 DEFAULT_MODEL = "openai/clip-vit-base-patch32"
@@ -61,11 +84,14 @@ class ClipRoomClassifier:
         self.model = CLIPModel.from_pretrained(model_name).to(self.device).eval()
         self.processor = CLIPProcessor.from_pretrained(model_name)
         self.rooms = list(ROOM_PROMPTS)
+        prompts = {**ROOM_PROMPTS, **DECOY_PROMPTS}
+        # Rooms first, then decoys. predict() returns one column per class.
+        self.classes = list(prompts)
 
-        # Encode every prompt once, then average per room.
+        # Encode every prompt once, then average per class.
         texts, owner = [], []
-        for i, room in enumerate(self.rooms):
-            for t in ROOM_PROMPTS[room]:
+        for i, name in enumerate(self.classes):
+            for t in prompts[name]:
                 texts.append(t)
                 owner.append(i)
         with torch.no_grad():
@@ -73,12 +99,13 @@ class ClipRoomClassifier:
             t_emb = self.model.get_text_features(**tok)
             t_emb = t_emb / t_emb.norm(dim=-1, keepdim=True)
         owner = torch.tensor(owner, device=self.device)
-        room_emb = torch.stack([t_emb[owner == i].mean(0) for i in range(len(self.rooms))])
+        room_emb = torch.stack([t_emb[owner == i].mean(0) for i in range(len(self.classes))])
         self.room_emb = room_emb / room_emb.norm(dim=-1, keepdim=True)
         self.scale = self.model.logit_scale.exp()
 
     def predict(self, images) -> np.ndarray:
-        """images: list of PIL images. Returns array (n_images, n_rooms) of probabilities."""
+        """images: list of PIL images. Returns (n_images, n_classes) probabilities,
+        columns in self.classes order (rooms, then decoys)."""
         with self.torch.no_grad():
             inp = self.processor(images=images, return_tensors="pt").to(self.device)
             i_emb = self.model.get_image_features(**inp)
@@ -128,7 +155,12 @@ def run(frames_dir: str, model_name: str = DEFAULT_MODEL, window: int = 5,
         raise SystemExit("Manifest has no frames.")
 
     clf = classifier or ClipRoomClassifier(model_name)
-    rooms = clf.rooms
+    classes = getattr(clf, "classes", clf.rooms)
+
+    def label(name: str) -> str:
+        if name.startswith("_"):
+            return DECOY_SHADOWS.get(name) or "unsure"
+        return name
 
     probs = []
     for i in range(0, len(records), batch):
@@ -145,10 +177,10 @@ def run(frames_dir: str, model_name: str = DEFAULT_MODEL, window: int = 5,
         out_frames.append({
             "file": r["file"],
             "time_sec": r["time_sec"],
-            "room": rooms[top[0]] if conf >= min_conf else "unsure",
+            "room": label(classes[top[0]]) if conf >= min_conf else "unsure",
             "confidence": round(conf, 3),
-            "raw_room": rooms[int(np.argmax(p_raw))],
-            "top3": {rooms[k]: round(float(p[k]), 3) for k in top},
+            "raw_room": label(classes[int(np.argmax(p_raw))]),
+            "top3": {classes[k]: round(float(p[k]), 3) for k in top},
         })
 
     result = {
